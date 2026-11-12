@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Lagoon Lab — iPad Graphics Showcase</title>
+<style>
+:root{
+  --glass:rgba(10,18,30,.58); --glass2:rgba(10,18,30,.42);
+  --stroke:rgba(255,255,255,.16); --txt:#f2f7ff; --dim:#9fb4cc;
+  --acc:#3ee6c4; --acc2:#7aa8ff; --warn:#ffb454;
+  --r:16px; --safeT:env(safe-area-inset-top,0px); --safeB:env(safe-area-inset-bottom,0px);
+}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;padding:0;height:100%;overflow:hidden;background:#04070d;color:var(--txt);
+  font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text",Inter,Roboto,"Segoe UI",sans-serif;
+  user-select:none;-webkit-user-select:none;touch-action:none;overscroll-behavior:none}
+canvas#gl,#fx{position:fixed;inset:0;width:100%;height:100%;display:block}
+#gl{z-index:0} #treeLayer{position:fixed;inset:0;z-index:1;pointer-events:none;overflow:hidden}
+#treeLayer img{position:absolute;left:0;top:0;transform-origin:50% 100%;will-change:transform;pointer-events:none}
+#fx{z-index:2}
+#vignette{position:fixed;inset:0;z-index:3;pointer-events:none;
+  background:radial-gradient(120% 95% at 50% 42%,transparent 55%,rgba(2,6,12,.42) 100%)}
+.glass{background:var(--glass);backdrop-filter:blur(16px) saturate(1.3);-webkit-backdrop-filter:blur(16px) saturate(1.3);
+  border:1px solid var(--stroke);border-radius:var(--r);box-shadow:0 8px 30px rgba(0,0,0,.45)}
+/* brand */
+#brand{position:fixed;z-index:10;left:12px;top:calc(10px + var(--safeT));display:flex;align-items:center;gap:10px;
+  padding:8px 14px 8px 12px;border-radius:14px}
+#brand .logo{width:34px;height:34px;border-radius:10px;display:grid;place-items:center;font-size:20px;
+  background:linear-gradient(135deg,#0e3a52,#0f766e 60%,#3ee6c4);box-shadow:inset 0 1px 0 rgba(255,255,255,.35)}
+#brand b{font-size:15px;letter-spacing:.3px;display:block;line-height:1.1}
+#brand small{color:var(--dim);font-size:11px}
+#fpsBox{margin-left:6px;text-align:right;font-variant-numeric:tabular-nums}
+#fps{font-size:15px;font-weight:700;color:var(--acc)}
+#qDot{font-size:10px;color:var(--dim)}
+/* dock */
+#dock{position:fixed;z-index:10;left:12px;top:50%;transform:translateY(-50%);display:flex;flex-direction:column;
+  padding:8px;gap:6px;max-height:calc(100% - 190px);overflow-y:auto;scrollbar-width:none}
+#dock::-webkit-scrollbar{display:none}
+#dock .lbl{font-size:9px;color:var(--dim);text-align:center;letter-spacing:1px;margin-top:2px}
+.tool{width:52px;height:52px;border-radius:13px;border:1px solid transparent;background:transparent;color:var(--txt);
+  font-size:23px;display:grid;place-items:center;cursor:pointer;transition:all .15s}
+.tool small{display:block;font-size:8px;margin-top:1px;color:var(--dim)}
+.tool.on{background:rgba(62,230,196,.18);border-color:rgba(62,230,196,.5);box-shadow:0 0 14px rgba(62,230,196,.25)}
+.tool:active{transform:scale(.92)}
+.bbtn{width:52px;height:52px;border-radius:50%;border:2px solid transparent;cursor:pointer;position:relative;
+  display:grid;place-items:center;font-size:20px;transition:all .15s;color:#fff;text-shadow:0 1px 3px rgba(0,0,0,.6)}
+.bbtn.on{border-color:#fff;box-shadow:0 0 0 2px var(--acc),0 0 16px rgba(62,230,196,.5)}
+.bbtn:active{transform:scale(.92)}
+/* panel */
+#panelToggle{position:fixed;z-index:11;right:12px;top:calc(10px + var(--safeT));width:46px;height:46px;border-radius:14px;
+  font-size:22px;display:grid;place-items:center;cursor:pointer;color:var(--txt)}
+#panel{position:fixed;z-index:10;right:12px;top:calc(66px + var(--safeT));bottom:calc(78px + var(--safeB));width:272px;
+  display:flex;flex-direction:column;overflow:hidden;transition:transform .25s,opacity .25s}
+#panel.hide{transform:translateX(120%);opacity:0;pointer-events:none}
+#tabs{display:flex;gap:4px;padding:8px 8px 0}
+#tabs button{flex:1;border:0;background:transparent;color:var(--dim);font-size:11px;font-weight:700;padding:9px 2px;
+  border-radius:10px;cursor:pointer}
+#tabs button.on{background:rgba(122,168,255,.2);color:#fff}
+#pages{flex:1;overflow-y:auto;padding:10px 12px 14px;-webkit-overflow-scrolling:touch;touch-action:pan-y}
+.page{display:none} .page.on{display:block}
+.ctl{margin:11px 0}
+.ctl .row{display:flex;justify-content:space-between;align-items:center;margin-bottom:2px}
+.ctl label{font-size:12.5px;font-weight:600}
+.ctl output{font-size:12px;color:var(--acc);font-variant-numeric:tabular-nums}
+.ctl .hint{font-size:10.5px;color:var(--dim);margin-top:1px}
+input[type=range]{-webkit-appearance:none;appearance:none;width:100%;height:34px;background:transparent;cursor:pointer;margin:0}
+input[type=range]::-webkit-slider-runnable-track{height:8px;border-radius:4px;
+  background:linear-gradient(90deg,var(--acc) var(--p,50%),rgba(255,255,255,.15) var(--p,50%))}
+input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:26px;height:26px;border-radius:50%;margin-top:-9px;
+  background:#fff;border:3px solid var(--acc);box-shadow:0 2px 8px rgba(0,0,0,.5)}
+input[type=range]::-moz-range-track{height:8px;border-radius:4px;background:rgba(255,255,255,.15)}
+input[type=range]::-moz-range-progress{height:8px;border-radius:4px;background:var(--acc)}
+input[type=range]::-moz-range-thumb{width:20px;height:20px;border-radius:50%;background:#fff;border:3px solid var(--acc)}
+.tgl{display:flex;justify-content:space-between;align-items:center;margin:12px 0;font-size:12.5px;font-weight:600}
+.sw{width:52px;height:30px;border-radius:15px;background:rgba(255,255,255,.18);border:1px solid var(--stroke);
+  position:relative;cursor:pointer;transition:background .2s;flex:none}
+.sw::after{content:"";position:absolute;top:2px;left:2px;width:24px;height:24px;border-radius:50%;background:#fff;
+  transition:left .2s;box-shadow:0 1px 4px rgba(0,0,0,.5)}
+.sw.on{background:var(--acc)} .sw.on::after{left:24px}
+.stepper{display:flex;align-items:center;gap:8px;margin:10px 0}
+.stepper button{width:40px;height:40px;border-radius:12px;font-size:20px;background:rgba(255,255,255,.1);
+  border:1px solid var(--stroke);color:#fff;cursor:pointer}
+.stepper b{flex:1;text-align:center;font-size:13px}
+.abtn{display:block;width:100%;margin:8px 0;padding:12px;border-radius:12px;border:1px solid var(--stroke);
+  background:rgba(122,168,255,.15);color:#fff;font-size:13px;font-weight:700;cursor:pointer}
+.abtn:active{transform:scale(.97)}
+.abtn.hot{background:rgba(255,180,84,.2);border-color:rgba(255,180,84,.5)}
+/* presets */
+#presets{position:fixed;z-index:10;left:50%;transform:translateX(-50%);bottom:calc(10px + var(--safeB));
+  display:flex;gap:8px;align-items:center;padding:8px 10px;max-width:calc(100vw - 24px);overflow-x:auto;scrollbar-width:none}
+#presets::-webkit-scrollbar{display:none}
+.chip{flex:none;border:1px solid var(--stroke);background:rgba(255,255,255,.07);color:var(--txt);border-radius:999px;
+  padding:10px 14px;font-size:13px;font-weight:700;cursor:pointer;white-space:nowrap}
+.chip.on{background:rgba(62,230,196,.22);border-color:var(--acc)}
+.chip:active{transform:scale(.94)}
+.sys{flex:none;width:44px;height:44px;border-radius:50%;border:1px solid var(--stroke);font-size:19px;
+  background:rgba(255,255,255,.07);color:var(--txt);cursor:pointer;display:grid;place-items:center}
+.sys:active{transform:scale(.9)}
+.vdiv{flex:none;width:1px;height:28px;background:var(--stroke)}
+/* toast + help */
+#toast{position:fixed;z-index:20;left:50%;bottom:calc(70px + var(--safeB));transform:translateX(-50%) translateY(20px);
+  padding:11px 18px;font-size:13px;font-weight:600;opacity:0;transition:all .35s;pointer-events:none;
+  max-width:calc(100vw - 40px);text-align:center}
+#toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+#help{position:fixed;z-index:30;inset:0;display:none;place-items:center;background:rgba(0,0,0,.55);padding:20px}
+#help.show{display:grid}
+#helpCard{max-width:520px;width:100%;padding:22px;max-height:80vh;overflow-y:auto;touch-action:pan-y}
+#helpCard h2{margin:0 0 8px;font-size:19px}
+#helpCard li{font-size:13px;margin:7px 0;color:#d7e3f4;line-height:1.45}
+#helpCard ul{padding-left:18px;margin:0 0 10px}
+#aim{position:fixed;z-index:9;pointer-events:none;display:none;border:2px dashed rgba(255,255,255,.7);
+  border-radius:50%;transform:translate(-50%,-50%)}
+@media (max-width:760px){
+  #panel{width:236px;top:auto;bottom:calc(74px + var(--safeB));max-height:52vh}
+  #brand small,#fpsBox{display:none}
+  .tool,.bbtn{width:46px;height:46px;font-size:20px}
+  #dock{max-height:calc(100% - 230px)}
+}
+</style>
+</head>
+<body>
+<canvas id="gl"></canvas>
+<div id="treeLayer"></div>
+<canvas id="fx"></canvas>
+<div id="vignette"></div>
+
+<header id="brand" class="glass">
+  <div class="logo">🌊</div>
+  <div><b>Lagoon Lab</b><small>iPad graphics showcase</small></div>
+  <div id="fpsBox"><div id="fps">60</div><div id="qDot">● AUTO</div></div>
+</header>
+
+<nav id="dock" class="glass"></nav>
+<button id="panelToggle" class="glass" aria-label="settings">⚙️</button>
+<aside id="panel" class="glass">
+  <div id="tabs"></div>
+  <div id="pages"></div>
+</aside>
+
+<div id="presets" class="glass"></div>
+<div id="toast" class="glass"></div>
+<div id="aim"></div>
+
+<div id="help"><div id="helpCard" class="glass">
+  <h2>🌊 Lagoon Lab — how to play</h2>
+  <ul>
+    <li><b>Throw:</b> drag anywhere &amp; release to hurl balls. Tap water for a plop. Pick ball types in the left dock.</li>
+    <li><b>Ripple:</b> poke &amp; drag the water to sculpt real propagating waves.</li>
+    <li><b>Move:</b> drag islands to rearrange the lagoon. Water, foam &amp; palms follow.</li>
+    <li><b>Magnet:</b> hold to bend gravity — balls, spray and embers swirl around your finger.</li>
+    <li><b>Presets:</b> one-tap moods at the bottom — try ⛈ Storm, then 🌙 Night water glow.</li>
+    <li><b>⚙️ panel:</b> ~25 sliders for ocean, sky, weather, islands &amp; FX. Everything morphs live.</li>
+    <li>Pinch the water with two fingers in Ripple mode for a double splash. Storms shake coconuts loose! 🥥</li>
+  </ul>
+  <button class="abtn" id="helpClose">Dive in 🤿</button>
+</div></div>
+
+<script>
+"use strict";
