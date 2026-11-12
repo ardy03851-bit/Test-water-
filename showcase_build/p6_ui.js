@@ -31,7 +31,7 @@ function stepper(page,label,min,max,get,set){
 }
 function action(page,label,fn,hot){
   const b=document.createElement('button');b.className='abtn'+(hot?' hot':'');b.textContent=label;
-  b.addEventListener('click',fn);page.appendChild(b);
+  b.addEventListener('click',fn);page.appendChild(b);return b;
 }
 let uiRefs={};
 function buildUI(){
@@ -120,8 +120,12 @@ function buildUI(){
 }
 function markChips(){document.querySelectorAll('#presets .chip').forEach((c,i)=>c.classList.toggle('on',i===presetOn));}
 function snapshot(){
+  /* a WebGL drawing buffer is cleared once the frame is composited, so draw a
+     fresh frame immediately before copying it — otherwise the PNG is empty */
+  if(hasGL&&GL){try{glFrame(skyAt(P.time),sunPos(),moonPos(),windT);}catch(err){}}
   const c=document.createElement('canvas');c.width=V.w;c.height=V.h;
   const x=c.getContext('2d');
+  x.fillStyle='#04070d';x.fillRect(0,0,V.w,V.h);
   x.drawImage(document.getElementById('gl'),0,0,V.w,V.h);
   x.drawImage(fx,0,0,V.w,V.h);
   const a=document.createElement('a');a.download='lagoon-lab.png';a.href=c.toDataURL('image/png');a.click();
@@ -195,11 +199,11 @@ function resize(){
 addEventListener('resize',resize);
 addEventListener('orientationchange',()=>setTimeout(resize,300));
 /* ---- main loop ---- */
-let lastT=0,acc=0,fpsE=60,qTimer=0,upTimer=0,hasGL=true,windT={x:0,y:0};
+let lastT=0,acc=0,fpsE=60,qTimer=0,upTimer=0,hasGL=false,windT={x:0,y:0};
 const EASEK=['time','cloud','fog','wind','gust','rain','storm','temp','tide','wave','chop','clarity','foam','glitter','bio','warmth','grav','bounce','islSize','ballR'];
 function loop(ms){
   requestAnimationFrame(loop);
-  const raw=Math.min(.05,(ms-lastT)/1000||.016);lastT=ms;
+  const raw=clamp((ms-lastT)/1000,0,.05)||.016;lastT=ms;
   fpsE=lerp(fpsE,1/Math.max(raw,1e-4),.05);
   if(V.paused)return;
   const dt=raw*(P.slowmo?.32:1);
@@ -235,7 +239,12 @@ function loop(ms){
   if(wasRainy&&P.rain<.12&&sky.sunI>.3){rainbowT=22;wasRainy=false;toast('🌈 The storm is clearing…');}
   rainbowT-=raw;
   /* render */
-  if(hasGL)glFrame(sky,sun,moon,windT);
+  if(hasGL){
+    try{glFrame(sky,sun,moon,windT);}
+    catch(err){
+      if(++glFails>3){glFail('Renderer error: '+(err&&err.message||err));}
+    }
+  }
   g.clearRect(0,0,V.w,V.h);
   if(!hasGL)fallbackDraw(g,sky,sun);
   drawDecals(sky,sun);drawBalls(sky,sun);drawParts();drawLightning();drawGulls(sky);drawRainbow(sky);drawAim();
@@ -251,26 +260,51 @@ function loop(ms){
 }
 /* ---- boot ---- */
 function loadImg(src){return new Promise((res,rej)=>{const i=new Image();
-  i.onload=()=>res(i);i.onerror=rej;i.src=src;});}
+  i.onload=()=>res(i);i.onerror=()=>rej(new Error('texture failed to decode'));i.src=src;});}
+/* Live renderer badge in the header — tells you at a glance whether the GPU
+   scene is up, or why it isn't. */
+function updateGLBadge(state){
+  const b=document.getElementById('glBadge');if(!b)return;
+  let txt,cls,tip;
+  if(state==='loading'){txt='LOADING…';cls='wait';tip='Decoding scene textures';}
+  else if(hasGL){txt=GL_VER===2?'WEBGL 2':'WEBGL 1';cls='ok';tip='GPU lagoon renderer active';}
+  else{txt='2D FALLBACK';cls='warn';tip=GL_ERR||'WebGL unavailable on this device';}
+  b.textContent=txt;b.className=cls;b.title=tip;
+}
 async function boot(){
   V.shakeOn=true;
-  buildUI();bindInput();
-  applyQMode();
-  try{
-    const [sand,grass,rock,tall,fan]=await Promise.all(
-      [TEX_SAND,TEX_GRASS,TEX_ROCK,TEX_PALM_T,TEX_PALM_F].map(loadImg));
-    treeImgs={tall:TEX_PALM_T,fan:TEX_PALM_F};
-    syncTrees();
-    try{hasGL=glInit({sand,grass,rock});}catch(err){hasGL=false;}
-  }catch(err){hasGL=false;treeImgs={tall:'',fan:''};}
-  layoutIslands();resize();
-  Object.assign(T,PRESETS[0].p);Object.assign(P,PRESETS[0].p);presetOn=0;markChips();
+  updateGLBadge('loading');
+  applyQMode();                       /* canvas sizes + island layout first       */
+  Object.assign(T,PRESETS[0].p);Object.assign(P,PRESETS[0].p);presetOn=0;
+  /* palm sprites are plain <img> sources — no decode needed before they show */
+  treeImgs={tall:TEX_PALM_T,fan:TEX_PALM_F};
+  layoutIslands();
+  /* the UI must never be able to stop the scene from rendering */
+  try{buildUI();}catch(err){console.error('[Lagoon Lab] UI build failed:',err);}
+  try{bindInput();}catch(err){console.error('[Lagoon Lab] input binding failed:',err);}
+  try{markChips();}catch(err){}
   spawnBall(0,V.w*.3,V.h*.25,140,0);spawnBall(1,V.w*.7,V.h*.2,-120,0);
-  $('#help').classList.add('show');
-  setTimeout(()=>toast('Drag anywhere to throw balls 🤿 Open ⚙️ for 25+ live controls',3600),600);
+  /* start animating straight away — the 2D backdrop is visible while the GPU
+     renderer decodes its textures, then WebGL takes over seamlessly          */
+  lastT=performance.now();
   requestAnimationFrame(loop);
+  const help=$('#help');if(help)help.classList.add('show');
+  setTimeout(()=>toast('Drag anywhere to throw balls 🤿 Open ⚙️ for 25+ live controls',3600),600);
+  /* GPU textures are only needed by the WebGL path, so they load in the
+     background with a timeout: a slow or broken decode can no longer stall boot */
+  try{
+    const imgs=await Promise.race([
+      Promise.all([TEX_SAND,TEX_GRASS,TEX_ROCK].map(loadImg)),
+      new Promise((_,rej)=>setTimeout(()=>rej(new Error('texture load timed out')),12000))
+    ]);
+    GL_IMGS={sand:imgs[0],grass:imgs[1],rock:imgs[2]};
+    hasGL=glInit(GL_IMGS);
+  }catch(err){
+    GL_ERR=GL_ERR||('Textures unavailable: '+(err&&err.message||err));
+    console.warn('[Lagoon Lab] '+GL_ERR);
+    hasGL=false;
+  }
+  updateGLBadge();
+  if(!hasGL)console.warn('[Lagoon Lab] running in 2D fallback mode:',GL_ERR);
 }
 boot();
-</script>
-</body>
-</html>

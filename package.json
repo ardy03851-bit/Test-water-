@@ -1,0 +1,16 @@
+{
+  "name": "lagoon-lab",
+  "private": true,
+  "description": "Lagoon Lab: single-file WebGL lagoon showcase, with build + headless test tooling",
+  "scripts": {
+    "build": "node showcase_build/build.js",
+    "test": "node tools/interaction-test.js && GL_MODE=none node tools/interaction-test.js",
+    "test:shaders": "node tools/validate-shaders.js",
+    "preview:2d": "node tools/render-preview.js"
+  },
+  "devDependencies": {
+    "@moreplease/glslang": "^16.6.0-1",
+    "@napi-rs/canvas": "^1.1.1",
+    "jsdom": "^31.0.0"
+  }
+}

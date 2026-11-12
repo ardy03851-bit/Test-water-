@@ -125,6 +125,7 @@ function auPop(){
   g.gain.setValueAtTime(.25,t);g.gain.exponentialRampToValueAtTime(.001,t+.14);
   o.connect(g);g.connect(c.destination);o.start(t);o.stop(t+.15);
 }
+
 /* ============ WebGL single-pass lagoon renderer + CPU ripple field ============ */
 const RIP_N=256, ripH=new Float32Array(RIP_N), ripV=new Float32Array(RIP_N);
 const ripPx=new Uint8Array(RIP_N*4);
@@ -298,48 +299,102 @@ void main(){
 }`;
 
 /* ---- GL engine ---- */
-let GL=null, U={}, glRipTex=null;
+let GL=null, U={}, glRipTex=null, GL_VER=0, GL_ERR='', GL_IMGS=null, glFails=0, glChecked=false;
+const TEX_MAX=1024;
+/* WebGL 1 rejects non-power-of-two textures that use mipmaps + REPEAT wrapping
+   (they sample as solid black), so every texture is first drawn into a POT canvas. */
+function potImage(img){
+  const iw=img.naturalWidth||img.width||1, ih=img.naturalHeight||img.height||1;
+  const pot=v=>{let p=1;while(p*2<=v&&p*2<=TEX_MAX)p*=2;return Math.max(1,p);};
+  const w=pot(iw), h=pot(ih);
+  if(w===iw&&h===ih) return img;
+  const c=document.createElement('canvas');c.width=w;c.height=h;
+  const x=c.getContext('2d');
+  if(!x) return img;
+  x.imageSmoothingEnabled=true;if('imageSmoothingQuality' in x)x.imageSmoothingQuality='high';
+  x.drawImage(img,0,0,w,h);
+  return c;
+}
 function glTex(img,slot){
   const gl=GL;gl.activeTexture(gl.TEXTURE0+slot);
   const t=gl.createTexture();gl.bindTexture(gl.TEXTURE_2D,t);
-  gl.texImage2D(gl.TEXTURE_2D,0,gl.RGB,gl.RGB,gl.UNSIGNED_BYTE,img);
+  gl.texImage2D(gl.TEXTURE_2D,0,gl.RGB,gl.RGB,gl.UNSIGNED_BYTE,potImage(img));
   gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.REPEAT);
   gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.REPEAT);
   gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR_MIPMAP_LINEAR);
   gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.LINEAR);
   gl.generateMipmap(gl.TEXTURE_2D);return t;
 }
+/* A GPU problem must never kill the scene silently: record why, then fall back to 2D. */
+function glFail(msg){
+  GL_ERR=msg;hasGL=false;
+  console.error('[Lagoon Lab] '+msg);
+  if(typeof toast==='function')toast('GPU renderer unavailable — 2D fallback',4200);
+  if(typeof updateGLBadge==='function')updateGLBadge();
+}
 function glInit(imgs){
   const cv=document.getElementById('gl');
-  GL=cv.getContext('webgl2',{antialias:false,alpha:false,depth:false,stencil:false,powerPreference:'high-performance'})
-    ||cv.getContext('webgl',{antialias:false,alpha:false,depth:false,stencil:false,powerPreference:'high-performance'});
-  if(!GL) return false;
-  const gl=GL;
-  const sh=(ty,src)=>{const s=gl.createShader(ty);gl.shaderSource(s,src);gl.compileShader(s);
-    if(!gl.getShaderParameter(s,gl.COMPILE_STATUS)) throw gl.getShaderInfoLog(s);return s;};
-  const pr=gl.createProgram();
-  gl.attachShader(pr,sh(gl.VERTEX_SHADER,VSRC));gl.attachShader(pr,sh(gl.FRAGMENT_SHADER,FSRC));
-  gl.linkProgram(pr);if(!gl.getProgramParameter(pr,gl.LINK_STATUS)) throw gl.getProgramInfoLog(pr);
-  gl.useProgram(pr);
-  const buf=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,buf);
-  gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,3,-1,-1,3]),gl.STATIC_DRAW);
-  const loc=gl.getAttribLocation(pr,'p');gl.enableVertexAttribArray(loc);gl.vertexAttribPointer(loc,2,gl.FLOAT,false,0,0);
-  ['uRes','uScale','uTime','uWL','uBed','uChop','uAmp','uRipAmp','uGlit','uBio','uSunPos','uMoonPos','uSunCol',
-   'uSunI','uMoonI','uSkyTop','uSkyMid','uSkyHor','uNight','uCloud','uCloudDark','uFlash','uFog','uRain',
-   'uW1','uW2','uW3','uWindT','uShal','uDeep','uClarity','uFoam','uTilt','uGrain','uRip','uSand','uGrass','uRock']
-   .forEach(n=>U[n]=gl.getUniformLocation(pr,n));
-  U.uIsl=gl.getUniformLocation(pr,'uIsl[0]');U.uBall=gl.getUniformLocation(pr,'uBall[0]');
-  glTex(imgs.sand,1);glTex(imgs.grass,2);glTex(imgs.rock,3);
-  gl.uniform1i(U.uSand,1);gl.uniform1i(U.uGrass,2);gl.uniform1i(U.uRock,3);
-  gl.activeTexture(gl.TEXTURE0);glRipTex=gl.createTexture();gl.bindTexture(gl.TEXTURE_2D,glRipTex);
-  gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,RIP_N,1,0,gl.RGBA,gl.UNSIGNED_BYTE,null);
-  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR);
-  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.LINEAR);
-  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE);
-  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);
-  gl.uniform1i(U.uRip,0);
-  return true;
+  if(!cv){GL_ERR='missing #gl canvas';return false;}
+  GL_IMGS=imgs||GL_IMGS;
+  try{
+    GL=cv.getContext('webgl2',{antialias:false,alpha:false,depth:false,stencil:false,powerPreference:'high-performance'})
+      ||cv.getContext('webgl',{antialias:false,alpha:false,depth:false,stencil:false,powerPreference:'high-performance'})
+      ||cv.getContext('experimental-webgl',{antialias:false,alpha:false,depth:false,stencil:false});
+  }catch(err){GL=null;}
+  if(!GL){GL_ERR='WebGL is not available in this browser';return false;}
+  GL_VER=(window.WebGL2RenderingContext&&GL instanceof WebGL2RenderingContext)?2:1;
+  if(!cv._lagoonCtxBound){
+    cv._lagoonCtxBound=true;
+    cv.addEventListener('webglcontextlost',e=>{
+      e.preventDefault();hasGL=false;GL_ERR='WebGL context lost';
+      console.warn('[Lagoon Lab] WebGL context lost — waiting for restore');
+      if(typeof updateGLBadge==='function')updateGLBadge();
+    },{passive:false});
+    cv.addEventListener('webglcontextrestored',()=>{
+      console.warn('[Lagoon Lab] WebGL context restored — rebuilding renderer');
+      try{hasGL=glInit(GL_IMGS);}catch(err){glFail('Renderer restore failed: '+(err&&err.message||err));}
+      if(typeof updateGLBadge==='function')updateGLBadge();
+    });
+  }
+  try{
+    if(!GL_IMGS||!GL_IMGS.sand) throw new Error('scene textures are not loaded yet');
+    const gl=GL;
+    const sh=(ty,src)=>{const s=gl.createShader(ty);gl.shaderSource(s,src);gl.compileShader(s);
+      if(!gl.getShaderParameter(s,gl.COMPILE_STATUS)) throw new Error('shader compile: '+gl.getShaderInfoLog(s));};
+    const pr=gl.createProgram();
+    gl.attachShader(pr,sh(gl.VERTEX_SHADER,VSRC));gl.attachShader(pr,sh(gl.FRAGMENT_SHADER,FSRC));
+    gl.linkProgram(pr);if(!gl.getProgramParameter(pr,gl.LINK_STATUS)) throw new Error('program link: '+gl.getProgramInfoLog(pr));
+    gl.useProgram(pr);
+    const buf=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,buf);
+    gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,3,-1,-1,3]),gl.STATIC_DRAW);
+    const loc=gl.getAttribLocation(pr,'p');gl.enableVertexAttribArray(loc);gl.vertexAttribPointer(loc,2,gl.FLOAT,false,0,0);
+    U={};
+    ['uRes','uScale','uTime','uWL','uBed','uChop','uAmp','uRipAmp','uGlit','uBio','uSunPos','uMoonPos','uSunCol',
+     'uSunI','uMoonI','uSkyTop','uSkyMid','uSkyHor','uNight','uCloud','uCloudDark','uFlash','uFog','uRain',
+     'uW1','uW2','uW3','uWindT','uShal','uDeep','uClarity','uFoam','uTilt','uGrain','uRip','uSand','uGrass','uRock']
+     .forEach(n=>U[n]=gl.getUniformLocation(pr,n));
+    U.uIsl=gl.getUniformLocation(pr,'uIsl[0]');U.uBall=gl.getUniformLocation(pr,'uBall[0]');
+    glTex(GL_IMGS.sand,1);glTex(GL_IMGS.grass,2);glTex(GL_IMGS.rock,3);
+    gl.uniform1i(U.uSand,1);gl.uniform1i(U.uGrass,2);gl.uniform1i(U.uRock,3);
+    gl.activeTexture(gl.TEXTURE0);glRipTex=gl.createTexture();gl.bindTexture(gl.TEXTURE_2D,glRipTex);
+    gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,RIP_N,1,0,gl.RGBA,gl.UNSIGNED_BYTE,null);
+    gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);
+    gl.uniform1i(U.uRip,0);
+    gl.clearColor(0.016,0.027,0.051,1);gl.clear(gl.COLOR_BUFFER_BIT);
+    console.info('[Lagoon Lab] WebGL '+GL_VER+' renderer ready ('+
+      (gl.getParameter(gl.VERSION)||'')+', fragment uniform vectors: '+gl.getParameter(gl.MAX_FRAGMENT_UNIFORM_VECTORS)+')');
+    glFails=0;
+    return true;
+  }catch(err){
+    GL_ERR='WebGL setup failed: '+(err&&err.message||err);
+    console.error('[Lagoon Lab] '+GL_ERR);
+    return false;
+  }
 }
+
 const islU=new Float32Array(16), ballU=new Float32Array(48);
 function glFrame(sky,sun,moon,windT){
   const gl=GL;if(!gl)return;
@@ -381,6 +436,34 @@ function glFrame(sky,sun,moon,windT){
     ballU[i*4]=b?b.x:-9999;ballU[i*4+1]=b?b.y:0;ballU[i*4+2]=b?b.r:0;ballU[i*4+3]=b?b.foamK:0;}
   gl.uniform4fv(U.uBall,ballU);
   gl.drawArrays(gl.TRIANGLES,0,3);
+  if(!glChecked){glChecked=true;glSelfCheck();}
+}
+/* One-off sanity check: if the very first GPU frame comes back as one flat
+   colour, the renderer failed (incomplete texture, lost context, black canvas).
+   Say so instead of leaving the user staring at an empty screen. */
+function glSelfCheck(){
+  const gl=GL;if(!gl||!gl.readPixels)return;
+  try{
+    const err=gl.getError?gl.getError():0;
+    if(err)console.warn('[Lagoon Lab] GL error on first frame: 0x'+(err>>>0).toString(16));
+    const w=gl.drawingBufferWidth,h=gl.drawingBufferHeight;
+    if(!w||!h)return;
+    const px=new Uint8Array(16*16*4);
+    const spots=[[w*.5,h*.15],[w*.2,h*.55],[w*.8,h*.85]];
+    let lo=1e9,hi=-1e9;
+    for(const [x,y] of spots){
+      const rx=Math.max(0,Math.min(w-16,x-8))|0, ry=Math.max(0,Math.min(h-16,y-8))|0;
+      gl.readPixels(rx,ry,16,16,gl.RGBA,gl.UNSIGNED_BYTE,px);
+      for(let i=0;i<px.length;i+=4){
+        const l=px[i]*.299+px[i+1]*.587+px[i+2]*.114;
+        if(l<lo)lo=l; if(l>hi)hi=l;
+      }
+    }
+    if(hi-lo<1.5)console.warn('[Lagoon Lab] first GPU frame looks blank (luma '+
+      lo.toFixed(1)+'..'+hi.toFixed(1)+') — textures or context problem');
+    else console.info('[Lagoon Lab] first GPU frame rendered (luma '+lo.toFixed(1)+'..'+hi.toFixed(1)+')');
+    if(gl.getError)gl.getError(); // clear the flag our probing may have set
+  }catch(e){console.warn('[Lagoon Lab] self-check skipped:',e.message);}
 }
 /* Minimal 2D fallback if WebGL is missing */
 function fallbackDraw(g,sky,sun){
@@ -398,6 +481,7 @@ function fallbackDraw(g,sky,sun){
     g.quadraticCurveTo(s.cx,wl-s.ph*1.5,s.cx+s.w*1.6,bedBase());g.closePath();g.fill();}
   g.fillStyle='rgba(255,255,255,.7)';g.fillRect(0,wl-2,W,4);
 }
+
 /* ============ World: islands, terrain, trees, balls, particles, critters ============ */
 const ISLDEF=[{fx:.20,w:150,ph:150},{fx:.53,w:105,ph:85},{fx:.83,w:175,ph:175},{fx:.37,w:120,ph:-34}];
 const ISL=[null,null,null,null];
@@ -625,6 +709,7 @@ function strike(x){
   auThunder(clamp(Math.abs(x-V.w/2)/V.w*1.4,.1,1.4),.8+P.storm*.4);
   ripExcite(x,1.2);spawnP(4,x,surfY(x),0,0,.8,20);spawnP(8,x,surfY(x)-10,0,-20,1.2,50);
 }
+
 /* ============ Overlay renderer (Canvas2D): decals, balls, particles, cinema ============ */
 const fx=document.getElementById('fx'), g=fx.getContext('2d');
 const FIRE={x:0,y:0,on:false,fl:1};
@@ -861,6 +946,7 @@ function drawAim(){
   aim.style.width=aim.style.height=(P.ballR*2)+'px';
 }
 function hideAim(){AIM=null;document.getElementById('aim').style.display='none';}
+
 /* ============ UI, input, main loop, boot ============ */
 let TOOL='throw';
 const $=s=>document.querySelector(s);
@@ -894,7 +980,7 @@ function stepper(page,label,min,max,get,set){
 }
 function action(page,label,fn,hot){
   const b=document.createElement('button');b.className='abtn'+(hot?' hot':'');b.textContent=label;
-  b.addEventListener('click',fn);page.appendChild(b);
+  b.addEventListener('click',fn);page.appendChild(b);return b;
 }
 let uiRefs={};
 function buildUI(){
@@ -983,8 +1069,12 @@ function buildUI(){
 }
 function markChips(){document.querySelectorAll('#presets .chip').forEach((c,i)=>c.classList.toggle('on',i===presetOn));}
 function snapshot(){
+  /* a WebGL drawing buffer is cleared once the frame is composited, so draw a
+     fresh frame immediately before copying it — otherwise the PNG is empty */
+  if(hasGL&&GL){try{glFrame(skyAt(P.time),sunPos(),moonPos(),windT);}catch(err){}}
   const c=document.createElement('canvas');c.width=V.w;c.height=V.h;
   const x=c.getContext('2d');
+  x.fillStyle='#04070d';x.fillRect(0,0,V.w,V.h);
   x.drawImage(document.getElementById('gl'),0,0,V.w,V.h);
   x.drawImage(fx,0,0,V.w,V.h);
   const a=document.createElement('a');a.download='lagoon-lab.png';a.href=c.toDataURL('image/png');a.click();
@@ -1058,11 +1148,11 @@ function resize(){
 addEventListener('resize',resize);
 addEventListener('orientationchange',()=>setTimeout(resize,300));
 /* ---- main loop ---- */
-let lastT=0,acc=0,fpsE=60,qTimer=0,upTimer=0,hasGL=true,windT={x:0,y:0};
+let lastT=0,acc=0,fpsE=60,qTimer=0,upTimer=0,hasGL=false,windT={x:0,y:0};
 const EASEK=['time','cloud','fog','wind','gust','rain','storm','temp','tide','wave','chop','clarity','foam','glitter','bio','warmth','grav','bounce','islSize','ballR'];
 function loop(ms){
   requestAnimationFrame(loop);
-  const raw=Math.min(.05,(ms-lastT)/1000||.016);lastT=ms;
+  const raw=clamp((ms-lastT)/1000,0,.05)||.016;lastT=ms;
   fpsE=lerp(fpsE,1/Math.max(raw,1e-4),.05);
   if(V.paused)return;
   const dt=raw*(P.slowmo?.32:1);
@@ -1098,7 +1188,12 @@ function loop(ms){
   if(wasRainy&&P.rain<.12&&sky.sunI>.3){rainbowT=22;wasRainy=false;toast('🌈 The storm is clearing…');}
   rainbowT-=raw;
   /* render */
-  if(hasGL)glFrame(sky,sun,moon,windT);
+  if(hasGL){
+    try{glFrame(sky,sun,moon,windT);}
+    catch(err){
+      if(++glFails>3){glFail('Renderer error: '+(err&&err.message||err));}
+    }
+  }
   g.clearRect(0,0,V.w,V.h);
   if(!hasGL)fallbackDraw(g,sky,sun);
   drawDecals(sky,sun);drawBalls(sky,sun);drawParts();drawLightning();drawGulls(sky);drawRainbow(sky);drawAim();
@@ -1114,23 +1209,51 @@ function loop(ms){
 }
 /* ---- boot ---- */
 function loadImg(src){return new Promise((res,rej)=>{const i=new Image();
-  i.onload=()=>res(i);i.onerror=rej;i.src=src;});}
+  i.onload=()=>res(i);i.onerror=()=>rej(new Error('texture failed to decode'));i.src=src;});}
+/* Live renderer badge in the header — tells you at a glance whether the GPU
+   scene is up, or why it isn't. */
+function updateGLBadge(state){
+  const b=document.getElementById('glBadge');if(!b)return;
+  let txt,cls,tip;
+  if(state==='loading'){txt='LOADING…';cls='wait';tip='Decoding scene textures';}
+  else if(hasGL){txt=GL_VER===2?'WEBGL 2':'WEBGL 1';cls='ok';tip='GPU lagoon renderer active';}
+  else{txt='2D FALLBACK';cls='warn';tip=GL_ERR||'WebGL unavailable on this device';}
+  b.textContent=txt;b.className=cls;b.title=tip;
+}
 async function boot(){
   V.shakeOn=true;
-  buildUI();bindInput();
-  applyQMode();
-  try{
-    const [sand,grass,rock,tall,fan]=await Promise.all(
-      [TEX_SAND,TEX_GRASS,TEX_ROCK,TEX_PALM_T,TEX_PALM_F].map(loadImg));
-    treeImgs={tall:TEX_PALM_T,fan:TEX_PALM_F};
-    syncTrees();
-    try{hasGL=glInit({sand,grass,rock});}catch(err){hasGL=false;}
-  }catch(err){hasGL=false;treeImgs={tall:'',fan:''};}
-  layoutIslands();resize();
-  Object.assign(T,PRESETS[0].p);Object.assign(P,PRESETS[0].p);presetOn=0;markChips();
+  updateGLBadge('loading');
+  applyQMode();                       /* canvas sizes + island layout first       */
+  Object.assign(T,PRESETS[0].p);Object.assign(P,PRESETS[0].p);presetOn=0;
+  /* palm sprites are plain <img> sources — no decode needed before they show */
+  treeImgs={tall:TEX_PALM_T,fan:TEX_PALM_F};
+  layoutIslands();
+  /* the UI must never be able to stop the scene from rendering */
+  try{buildUI();}catch(err){console.error('[Lagoon Lab] UI build failed:',err);}
+  try{bindInput();}catch(err){console.error('[Lagoon Lab] input binding failed:',err);}
+  try{markChips();}catch(err){}
   spawnBall(0,V.w*.3,V.h*.25,140,0);spawnBall(1,V.w*.7,V.h*.2,-120,0);
-  $('#help').classList.add('show');
-  setTimeout(()=>toast('Drag anywhere to throw balls 🤿 Open ⚙️ for 25+ live controls',3600),600);
+  /* start animating straight away — the 2D backdrop is visible while the GPU
+     renderer decodes its textures, then WebGL takes over seamlessly          */
+  lastT=performance.now();
   requestAnimationFrame(loop);
+  const help=$('#help');if(help)help.classList.add('show');
+  setTimeout(()=>toast('Drag anywhere to throw balls 🤿 Open ⚙️ for 25+ live controls',3600),600);
+  /* GPU textures are only needed by the WebGL path, so they load in the
+     background with a timeout: a slow or broken decode can no longer stall boot */
+  try{
+    const imgs=await Promise.race([
+      Promise.all([TEX_SAND,TEX_GRASS,TEX_ROCK].map(loadImg)),
+      new Promise((_,rej)=>setTimeout(()=>rej(new Error('texture load timed out')),12000))
+    ]);
+    GL_IMGS={sand:imgs[0],grass:imgs[1],rock:imgs[2]};
+    hasGL=glInit(GL_IMGS);
+  }catch(err){
+    GL_ERR=GL_ERR||('Textures unavailable: '+(err&&err.message||err));
+    console.warn('[Lagoon Lab] '+GL_ERR);
+    hasGL=false;
+  }
+  updateGLBadge();
+  if(!hasGL)console.warn('[Lagoon Lab] running in 2D fallback mode:',GL_ERR);
 }
 boot();
